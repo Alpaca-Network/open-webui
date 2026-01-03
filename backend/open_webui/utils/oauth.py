@@ -25,6 +25,14 @@ from fastapi import (
 from starlette.responses import RedirectResponse
 from typing import Optional
 
+# WorkOS SDK - conditionally imported
+try:
+    from workos import WorkOSClient
+    WORKOS_AVAILABLE = True
+except ImportError:
+    WORKOS_AVAILABLE = False
+    WorkOSClient = None
+
 
 from open_webui.models.auths import Auths
 from open_webui.models.oauth_sessions import OAuthSessions
@@ -54,6 +62,12 @@ from open_webui.config import (
     WEBHOOK_URL,
     JWT_EXPIRES_IN,
     AppConfig,
+    # WorkOS configuration
+    WORKOS_CLIENT_ID,
+    WORKOS_API_KEY,
+    WORKOS_ORGANIZATION_ID,
+    WORKOS_CONNECTION_ID,
+    WORKOS_REDIRECT_URI,
 )
 from open_webui.constants import ERROR_MESSAGES, WEBHOOK_MESSAGES
 from open_webui.env import (
@@ -643,8 +657,28 @@ class OAuthManager:
         self.app = app
 
         self._clients = {}
+        self._workos_client = None
+
+        # Initialize WorkOS client if configured
+        if (
+            WORKOS_AVAILABLE
+            and WORKOS_CLIENT_ID.value
+            and WORKOS_API_KEY.value
+        ):
+            try:
+                self._workos_client = WorkOSClient(
+                    api_key=WORKOS_API_KEY.value,
+                    client_id=WORKOS_CLIENT_ID.value,
+                )
+                log.info("WorkOS SSO client initialized successfully")
+            except Exception as e:
+                log.error(f"Failed to initialize WorkOS client: {e}")
+                self._workos_client = None
 
         for name, provider_config in OAUTH_PROVIDERS.items():
+            # Skip WorkOS as it uses its own SDK
+            if provider_config.get("uses_workos_sdk"):
+                continue
             if "register" not in provider_config:
                 log.error(f"OAuth provider {name} missing register function")
                 continue
@@ -1085,6 +1119,11 @@ class OAuthManager:
     async def handle_login(self, request, provider):
         if provider not in OAUTH_PROVIDERS:
             raise HTTPException(404)
+
+        # Handle WorkOS SSO separately
+        if provider == "workos":
+            return await self._handle_workos_login(request)
+
         # If the provider has a custom redirect URL, use that, otherwise automatically generate one
         redirect_uri = OAUTH_PROVIDERS[provider].get("redirect_uri") or request.url_for(
             "oauth_login_callback", provider=provider
@@ -1094,9 +1133,54 @@ class OAuthManager:
             raise HTTPException(404)
         return await client.authorize_redirect(request, redirect_uri)
 
+    async def _handle_workos_login(self, request):
+        """Handle WorkOS SSO login initiation."""
+        if not self._workos_client:
+            log.error("WorkOS client not initialized")
+            raise HTTPException(500, detail="WorkOS SSO not configured")
+
+        redirect_base_url = (
+            str(request.app.state.config.WEBUI_URL or request.base_url)
+        ).rstrip("/")
+
+        # Use configured redirect URI or generate one
+        redirect_uri = WORKOS_REDIRECT_URI.value or f"{redirect_base_url}/oauth/workos/callback"
+
+        try:
+            # Build authorization URL parameters
+            auth_params = {
+                "redirect_uri": redirect_uri,
+            }
+
+            # Use organization_id if provided, otherwise use connection_id
+            if WORKOS_ORGANIZATION_ID.value:
+                auth_params["organization_id"] = WORKOS_ORGANIZATION_ID.value
+            elif WORKOS_CONNECTION_ID.value:
+                auth_params["connection_id"] = WORKOS_CONNECTION_ID.value
+            else:
+                log.error("WorkOS requires either organization_id or connection_id")
+                raise HTTPException(
+                    500,
+                    detail="WorkOS SSO requires either WORKOS_ORGANIZATION_ID or WORKOS_CONNECTION_ID",
+                )
+
+            # Generate authorization URL using WorkOS SDK
+            authorization_url = self._workos_client.sso.get_authorization_url(**auth_params)
+
+            log.debug(f"WorkOS authorization URL: {authorization_url}")
+            return RedirectResponse(url=authorization_url)
+
+        except Exception as e:
+            log.error(f"Error generating WorkOS authorization URL: {e}")
+            raise HTTPException(500, detail=f"Failed to initiate WorkOS SSO: {str(e)}")
+
     async def handle_callback(self, request, provider, response):
         if provider not in OAUTH_PROVIDERS:
             raise HTTPException(404)
+
+        # Handle WorkOS SSO callback separately
+        if provider == "workos":
+            return await self._handle_workos_callback(request, response)
 
         error_message = None
         try:
@@ -1370,5 +1454,218 @@ class OAuthManager:
             )
         except Exception as e:
             log.error(f"Failed to store OAuth session server-side: {e}")
+
+        return response
+
+    async def _handle_workos_callback(self, request, response):
+        """Handle WorkOS SSO callback and authenticate user."""
+        if not self._workos_client:
+            log.error("WorkOS client not initialized")
+            raise HTTPException(500, detail="WorkOS SSO not configured")
+
+        error_message = None
+        user = None
+        jwt_token = None
+
+        try:
+            # Get the authorization code from the callback
+            code = request.query_params.get("code")
+            if not code:
+                error = request.query_params.get("error")
+                error_description = request.query_params.get("error_description", "")
+                log.warning(f"WorkOS callback error: {error} - {error_description}")
+                raise HTTPException(400, detail=error_description or ERROR_MESSAGES.INVALID_CRED)
+
+            # Exchange the code for user profile
+            try:
+                profile_and_token = self._workos_client.sso.get_profile_and_token(code)
+                profile = profile_and_token.profile
+                access_token = profile_and_token.access_token
+            except Exception as e:
+                log.warning(f"WorkOS authentication error: {e}")
+                raise HTTPException(400, detail=ERROR_MESSAGES.INVALID_CRED)
+
+            if not profile:
+                log.warning("WorkOS callback failed, profile is missing")
+                raise HTTPException(400, detail=ERROR_MESSAGES.INVALID_CRED)
+
+            # Validate organization_id if configured
+            if WORKOS_ORGANIZATION_ID.value and profile.organization_id != WORKOS_ORGANIZATION_ID.value:
+                log.warning(
+                    f"WorkOS organization mismatch: expected {WORKOS_ORGANIZATION_ID.value}, got {profile.organization_id}"
+                )
+                raise HTTPException(403, detail=ERROR_MESSAGES.ACCESS_PROHIBITED)
+
+            # Extract user data from WorkOS profile
+            sub = profile.id  # WorkOS profile ID
+            email = profile.email
+            if not email:
+                log.warning(f"WorkOS callback failed, email is missing: {profile}")
+                raise HTTPException(400, detail=ERROR_MESSAGES.INVALID_CRED)
+            email = email.lower()
+
+            # Check email domain restrictions
+            if (
+                "*" not in auth_manager_config.OAUTH_ALLOWED_DOMAINS
+                and email.split("@")[-1] not in auth_manager_config.OAUTH_ALLOWED_DOMAINS
+            ):
+                log.warning(
+                    f"WorkOS callback failed, e-mail domain is not in the list of allowed domains: {email}"
+                )
+                raise HTTPException(400, detail=ERROR_MESSAGES.INVALID_CRED)
+
+            provider_sub = f"workos@{sub}"
+
+            # Build user_data dict for role management compatibility
+            user_data = {
+                "sub": sub,
+                "email": email,
+                "name": f"{profile.first_name or ''} {profile.last_name or ''}".strip() or email,
+                "first_name": profile.first_name,
+                "last_name": profile.last_name,
+                "picture": getattr(profile, "profile_picture_url", None),
+                "connection_id": profile.connection_id,
+                "connection_type": profile.connection_type,
+                "organization_id": profile.organization_id,
+                "idp_id": profile.idp_id,
+            }
+
+            # Add role if available from WorkOS profile
+            if hasattr(profile, "role") and profile.role:
+                user_data["roles"] = [profile.role.slug] if hasattr(profile.role, "slug") else [profile.role]
+
+            # Check if the user exists
+            user = Users.get_user_by_oauth_sub(provider_sub)
+            if not user:
+                # If the user does not exist, check if merging is enabled
+                if auth_manager_config.OAUTH_MERGE_ACCOUNTS_BY_EMAIL:
+                    user = Users.get_user_by_email(email)
+                    if user:
+                        Users.update_user_oauth_sub_by_id(user.id, provider_sub)
+
+            if user:
+                determined_role = self.get_user_role(user, user_data)
+                if user.role != determined_role:
+                    Users.update_user_role_by_id(user.id, determined_role)
+                # Update profile picture if enabled
+                if auth_manager_config.OAUTH_UPDATE_PICTURE_ON_LOGIN:
+                    picture_url = user_data.get("picture")
+                    if picture_url:
+                        processed_picture_url = await self._process_picture_url(picture_url)
+                        if processed_picture_url != user.profile_image_url:
+                            Users.update_user_profile_image_url_by_id(user.id, processed_picture_url)
+                            log.debug(f"Updated profile picture for user {user.email}")
+            else:
+                # If the user does not exist, check if signups are enabled
+                if auth_manager_config.ENABLE_OAUTH_SIGNUP:
+                    existing_user = Users.get_user_by_email(email)
+                    if existing_user:
+                        raise HTTPException(400, detail=ERROR_MESSAGES.EMAIL_TAKEN)
+
+                    picture_url = user_data.get("picture")
+                    if picture_url:
+                        picture_url = await self._process_picture_url(picture_url)
+                    else:
+                        picture_url = "/user.png"
+
+                    name = user_data.get("name") or email
+
+                    user = Auths.insert_new_auth(
+                        email=email,
+                        password=get_password_hash(str(uuid.uuid4())),
+                        name=name,
+                        profile_image_url=picture_url,
+                        role=self.get_user_role(None, user_data),
+                        oauth_sub=provider_sub,
+                    )
+
+                    if auth_manager_config.WEBHOOK_URL:
+                        await post_webhook(
+                            WEBUI_NAME,
+                            auth_manager_config.WEBHOOK_URL,
+                            WEBHOOK_MESSAGES.USER_SIGNUP(user.name),
+                            {
+                                "action": "signup",
+                                "message": WEBHOOK_MESSAGES.USER_SIGNUP(user.name),
+                                "user": user.model_dump_json(exclude_none=True),
+                            },
+                        )
+                else:
+                    raise HTTPException(
+                        status.HTTP_403_FORBIDDEN,
+                        detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+                    )
+
+            jwt_token = create_token(
+                data={"id": user.id},
+                expires_delta=parse_duration(auth_manager_config.JWT_EXPIRES_IN),
+            )
+
+            if auth_manager_config.ENABLE_OAUTH_GROUP_MANAGEMENT and user.role != "admin":
+                self.update_user_groups(
+                    user=user,
+                    user_data=user_data,
+                    default_permissions=request.app.state.config.USER_PERMISSIONS,
+                )
+
+        except Exception as e:
+            log.error(f"Error during WorkOS OAuth process: {e}")
+            error_message = (
+                e.detail
+                if isinstance(e, HTTPException) and e.detail
+                else ERROR_MESSAGES.DEFAULT("Error during WorkOS SSO process")
+            )
+
+        redirect_base_url = (
+            str(request.app.state.config.WEBUI_URL or request.base_url)
+        ).rstrip("/")
+        redirect_url = f"{redirect_base_url}/auth"
+
+        if error_message:
+            redirect_url = f"{redirect_url}?error={error_message}"
+            return RedirectResponse(url=redirect_url, headers=response.headers)
+
+        response = RedirectResponse(url=redirect_url, headers=response.headers)
+
+        # Set the cookie token
+        response.set_cookie(
+            key="token",
+            value=jwt_token,
+            httponly=False,
+            samesite=WEBUI_AUTH_COOKIE_SAME_SITE,
+            secure=WEBUI_AUTH_COOKIE_SECURE,
+        )
+
+        try:
+            # Create a pseudo-token for session storage
+            token_data = {
+                "access_token": access_token,
+                "issued_at": datetime.now().timestamp(),
+                "expires_at": datetime.now().timestamp() + 3600,  # 1 hour default
+            }
+
+            # Clean up any existing sessions for this user/provider first
+            sessions = OAuthSessions.get_sessions_by_user_id(user.id)
+            for session in sessions:
+                if session.provider == "workos":
+                    OAuthSessions.delete_session_by_id(session.id)
+
+            session = OAuthSessions.create_session(
+                user_id=user.id,
+                provider="workos",
+                token=token_data,
+            )
+
+            response.set_cookie(
+                key="oauth_session_id",
+                value=session.id,
+                httponly=True,
+                samesite=WEBUI_AUTH_COOKIE_SAME_SITE,
+                secure=WEBUI_AUTH_COOKIE_SECURE,
+            )
+
+            log.info(f"Stored WorkOS OAuth session server-side for user {user.id}")
+        except Exception as e:
+            log.error(f"Failed to store WorkOS OAuth session server-side: {e}")
 
         return response

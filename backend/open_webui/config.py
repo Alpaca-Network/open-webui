@@ -545,6 +545,37 @@ FEISHU_REDIRECT_URI = PersistentConfig(
     os.environ.get("FEISHU_REDIRECT_URI", ""),
 )
 
+# WorkOS SSO Configuration
+WORKOS_CLIENT_ID = PersistentConfig(
+    "WORKOS_CLIENT_ID",
+    "oauth.workos.client_id",
+    os.environ.get("WORKOS_CLIENT_ID", ""),
+)
+
+WORKOS_API_KEY = PersistentConfig(
+    "WORKOS_API_KEY",
+    "oauth.workos.api_key",
+    os.environ.get("WORKOS_API_KEY", ""),
+)
+
+WORKOS_ORGANIZATION_ID = PersistentConfig(
+    "WORKOS_ORGANIZATION_ID",
+    "oauth.workos.organization_id",
+    os.environ.get("WORKOS_ORGANIZATION_ID", ""),
+)
+
+WORKOS_CONNECTION_ID = PersistentConfig(
+    "WORKOS_CONNECTION_ID",
+    "oauth.workos.connection_id",
+    os.environ.get("WORKOS_CONNECTION_ID", ""),
+)
+
+WORKOS_REDIRECT_URI = PersistentConfig(
+    "WORKOS_REDIRECT_URI",
+    "oauth.workos.redirect_uri",
+    os.environ.get("WORKOS_REDIRECT_URI", ""),
+)
+
 ENABLE_OAUTH_ROLE_MANAGEMENT = PersistentConfig(
     "ENABLE_OAUTH_ROLE_MANAGEMENT",
     "oauth.enable_role_mapping",
@@ -769,6 +800,14 @@ def load_oauth_providers():
             "sub_claim": "user_id",
         }
 
+    # WorkOS SSO - uses its own SDK, not standard OAuth registration
+    if WORKOS_CLIENT_ID.value and WORKOS_API_KEY.value:
+        OAUTH_PROVIDERS["workos"] = {
+            "name": "WorkOS SSO",
+            "redirect_uri": WORKOS_REDIRECT_URI.value,
+            "uses_workos_sdk": True,  # Flag to indicate WorkOS uses its own SDK
+        }
+
     configured_providers = []
     if GOOGLE_CLIENT_ID.value:
         configured_providers.append("Google")
@@ -778,9 +817,13 @@ def load_oauth_providers():
         configured_providers.append("GitHub")
     if FEISHU_CLIENT_ID.value:
         configured_providers.append("Feishu")
+    if WORKOS_CLIENT_ID.value:
+        configured_providers.append("WorkOS")
 
-    if configured_providers and not OPENID_PROVIDER_URL.value:
-        provider_list = ", ".join(configured_providers)
+    # WorkOS handles logout differently, so exclude it from this warning
+    non_workos_providers = [p for p in configured_providers if p != "WorkOS"]
+    if non_workos_providers and not OPENID_PROVIDER_URL.value:
+        provider_list = ", ".join(non_workos_providers)
         log.warning(
             f"⚠️  OAuth providers configured ({provider_list}) but OPENID_PROVIDER_URL not set - logout will not work!"
         )
