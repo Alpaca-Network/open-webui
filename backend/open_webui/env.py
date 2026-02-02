@@ -110,9 +110,9 @@ for source in log_sources:
 
 log.setLevel(SRC_LOG_LEVELS["CONFIG"])
 
-WEBUI_NAME = os.environ.get("WEBUI_NAME", "Open WebUI")
-if WEBUI_NAME != "Open WebUI":
-    WEBUI_NAME += " (Open WebUI)"
+WEBUI_NAME = os.environ.get("WEBUI_NAME", "Gatewayz Enterprise")
+if WEBUI_NAME != "Gatewayz Enterprise":
+    WEBUI_NAME += " (Gatewayz Enterprise)"
 
 WEBUI_FAVICON_URL = "https://terragon-www-production.up.railway.app/_next/image?url=%2Fgatewayz-logo-white.png&w=32&q=75"
 
