@@ -77,6 +77,12 @@ ENV OPENAI_API_KEY="" \
     DO_NOT_TRACK=true \
     ANONYMIZED_TELEMETRY=false
 
+## Gatewayz-only Configuration ##
+## Only Gatewayz is enabled by default, OpenAI and Ollama are disabled
+ENV ENABLE_OLLAMA_API="false" \
+    ENABLE_OPENAI_API="false" \
+    ENABLE_GATEWAYZ_API="true"
+
 #### Other models #########################################################
 ## whisper TTS model settings ##
 ENV WHISPER_MODEL="base" \

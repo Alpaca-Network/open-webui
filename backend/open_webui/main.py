@@ -95,6 +95,12 @@ from open_webui.routers import (
     utils,
     scim,
 )
+from open_webui.routers.gatewayz import (
+    fetch_rankings_from_gatewayz,
+    extract_top_models_by_provider,
+    TOP_MODEL_PROVIDERS,
+    TOP_MODELS_PER_PROVIDER,
+)
 
 from open_webui.routers.retrieval import (
     get_embedding_function,
@@ -551,6 +557,86 @@ https://github.com/open-webui/open-webui
 )
 
 
+async def activate_top_gatewayz_models(app: FastAPI):
+    """
+    Fetch rankings from Gatewayz API and set top models as active.
+    This runs on every startup to keep models in sync with rankings.
+    Sets top 3 models from each provider: OpenAI, Anthropic, Google/Gemini, xAI/Grok.
+    """
+    try:
+        if not app.state.config.GATEWAYZ_API_BASE_URLS:
+            log.info(
+                "No Gatewayz API URLs configured. "
+                "Set GATEWAYZ_API_BASE_URL to enable auto-activation of top models."
+            )
+            return
+
+        # Use the first configured URL and key
+        api_url = app.state.config.GATEWAYZ_API_BASE_URLS[0]
+        api_key = (
+            app.state.config.GATEWAYZ_API_KEYS[0]
+            if app.state.config.GATEWAYZ_API_KEYS
+            else ""
+        )
+
+        if not api_key:
+            log.warning(
+                "No Gatewayz API key configured. "
+                "Set GATEWAYZ_API_KEY to enable auto-activation of top models. "
+                "You can configure this in the Admin settings or via environment variable."
+            )
+            # Continue anyway - the API might not require a key or it might be public
+            # The fetch will fail gracefully if authentication is required
+
+        log.info(f"Fetching Gatewayz rankings from {api_url}...")
+        rankings = await fetch_rankings_from_gatewayz(api_url, api_key)
+
+        if not rankings:
+            log.warning(
+                "No rankings data received from Gatewayz API. "
+                "Top models will not be auto-activated. "
+                "You can manually configure models in the Admin settings."
+            )
+            return
+
+        # Extract top models by provider
+        top_models = extract_top_models_by_provider(
+            rankings, TOP_MODEL_PROVIDERS, TOP_MODELS_PER_PROVIDER
+        )
+
+        if not top_models:
+            log.warning(
+                "No top models found in rankings. "
+                "Model list will remain empty until configured in Admin settings."
+            )
+            return
+
+        log.info(f"Setting {len(top_models)} top models as active: {top_models}")
+
+        # Update the GATEWAYZ_API_CONFIGS for the first URL to include these models
+        # Create a new dict to ensure PersistentConfig setter is triggered
+        current_configs = dict(app.state.config.GATEWAYZ_API_CONFIGS)
+
+        # Update config for the first URL (index 0)
+        if "0" not in current_configs:
+            current_configs["0"] = {}
+
+        current_configs["0"] = {
+            **current_configs.get("0", {}),
+            "enable": True,
+            "model_ids": top_models,
+        }
+
+        # Persist the configuration update by assigning new dict
+        app.state.config.GATEWAYZ_API_CONFIGS = current_configs
+
+        log.info("Successfully activated top Gatewayz models")
+
+    except Exception as e:
+        log.error(f"Error activating top Gatewayz models: {e}")
+        # Don't fail startup if rankings fetch fails
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.instance_id = INSTANCE_ID
@@ -586,6 +672,10 @@ async def lifespan(app: FastAPI):
         limiter.total_tokens = THREAD_POOL_SIZE
 
     asyncio.create_task(periodic_usage_pool_cleanup())
+
+    # Auto-activate top Gatewayz models on startup
+    if app.state.config.ENABLE_GATEWAYZ_API:
+        await activate_top_gatewayz_models(app)
 
     if app.state.config.ENABLE_BASE_MODELS_CACHE:
         await get_all_models(

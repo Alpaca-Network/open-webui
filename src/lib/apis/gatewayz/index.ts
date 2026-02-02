@@ -265,6 +265,77 @@ export const getGatewayzModels = async (token: string, urlIdx?: number) => {
 	return res;
 };
 
+export type GatewayzRankingsResponse = {
+	data: any[];
+	top_models: string[];
+	providers: string[];
+	top_n_per_provider: number;
+};
+
+export const getGatewayzRankings = async (token: string = ''): Promise<GatewayzRankingsResponse> => {
+	let error = null;
+
+	const res = await fetch(`${GATEWAYZ_API_BASE_URL}/rankings`, {
+		method: 'GET',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			...(token && { authorization: `Bearer ${token}` })
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			if ('detail' in err) {
+				error = err.detail;
+			} else {
+				error = 'Server connection failed';
+			}
+			return { data: [], top_models: [], providers: [], top_n_per_provider: 0 };
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const getGatewayzTopModels = async (token: string = ''): Promise<string[]> => {
+	let error = null;
+
+	const res = await fetch(`${GATEWAYZ_API_BASE_URL}/rankings/top-models`, {
+		method: 'GET',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			...(token && { authorization: `Bearer ${token}` })
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			if ('detail' in err) {
+				error = err.detail;
+			} else {
+				error = 'Server connection failed';
+			}
+			return { top_models: [] };
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res.top_models || [];
+};
+
 export const verifyGatewayzConnection = async (
 	token: string = '',
 	connection: dict = {},
