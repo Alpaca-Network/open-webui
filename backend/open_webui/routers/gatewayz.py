@@ -394,6 +394,146 @@ async def get_models(request: Request, user=Depends(get_verified_user)):
     return await get_all_models(request, user)
 
 
+# Target providers for top models
+TOP_MODEL_PROVIDERS = ["openai", "anthropic", "google", "xai"]
+TOP_MODELS_PER_PROVIDER = 3
+
+
+async def fetch_rankings_from_gatewayz(api_url: str, api_key: str) -> list:
+    """Fetch rankings from Gatewayz API"""
+    # Use the base URL to construct the rankings endpoint
+    # Remove /v1 suffix if present to get base API URL
+    base_url = api_url.rstrip("/")
+    if base_url.endswith("/v1"):
+        base_url = base_url[:-3]
+
+    rankings_url = f"{base_url}/ranking/apps"
+
+    timeout = aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+            async with session.get(
+                rankings_url,
+                headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
+                ssl=AIOHTTP_CLIENT_SESSION_SSL,
+            ) as response:
+                if response.status == 200:
+                    return await response.json()
+                else:
+                    log.error(f"Failed to fetch rankings: {response.status}")
+                    return []
+    except Exception as e:
+        log.error(f"Error fetching rankings from Gatewayz: {e}")
+        return []
+
+
+def extract_top_models_by_provider(
+    rankings: list, providers: list[str], top_n: int = 3
+) -> list[str]:
+    """
+    Extract top N models for each specified provider from rankings.
+
+    Args:
+        rankings: List of ranked models/apps from Gatewayz API
+        providers: List of provider names to filter (e.g., ["openai", "anthropic"])
+        top_n: Number of top models to include per provider
+
+    Returns:
+        List of model IDs
+    """
+    if not rankings:
+        return []
+
+    # Handle both list of objects and dict with data key
+    if isinstance(rankings, dict) and "data" in rankings:
+        rankings = rankings["data"]
+
+    if not isinstance(rankings, list):
+        log.warning(f"Unexpected rankings format: {type(rankings)}")
+        return []
+
+    # Group models by provider
+    provider_models = {provider.lower(): [] for provider in providers}
+
+    for item in rankings:
+        if not isinstance(item, dict):
+            continue
+
+        # Try to extract provider from various possible fields
+        provider = None
+        if "provider" in item:
+            provider = str(item["provider"]).lower()
+        elif "owned_by" in item:
+            provider = str(item["owned_by"]).lower()
+        elif "model_id" in item or "id" in item:
+            # Try to infer provider from model ID
+            model_id = item.get("model_id", item.get("id", "")).lower()
+            for p in providers:
+                if p.lower() in model_id:
+                    provider = p.lower()
+                    break
+
+        if provider and provider in provider_models:
+            # Get model ID
+            model_id = item.get("model_id") or item.get("id") or item.get("name")
+            if model_id and model_id not in provider_models[provider]:
+                provider_models[provider].append(model_id)
+
+    # Collect top N from each provider
+    top_models = []
+    for provider in providers:
+        provider_key = provider.lower()
+        if provider_key in provider_models:
+            top_models.extend(provider_models[provider_key][:top_n])
+
+    return top_models
+
+
+@router.get("/rankings")
+async def get_rankings(request: Request, user=Depends(get_verified_user)):
+    """
+    Fetch model rankings from Gatewayz API.
+    Returns top 3 models per provider (OpenAI, Anthropic, Google/Gemini, xAI/Grok).
+    """
+    if not request.app.state.config.ENABLE_GATEWAYZ_API:
+        return {"data": [], "top_models": []}
+
+    if not request.app.state.config.GATEWAYZ_API_BASE_URLS:
+        return {"data": [], "top_models": []}
+
+    # Use the first configured URL and key
+    api_url = request.app.state.config.GATEWAYZ_API_BASE_URLS[0]
+    api_key = (
+        request.app.state.config.GATEWAYZ_API_KEYS[0]
+        if request.app.state.config.GATEWAYZ_API_KEYS
+        else ""
+    )
+
+    rankings = await fetch_rankings_from_gatewayz(api_url, api_key)
+
+    # Extract top models by provider
+    top_models = extract_top_models_by_provider(
+        rankings, TOP_MODEL_PROVIDERS, TOP_MODELS_PER_PROVIDER
+    )
+
+    return {
+        "data": rankings,
+        "top_models": top_models,
+        "providers": TOP_MODEL_PROVIDERS,
+        "top_n_per_provider": TOP_MODELS_PER_PROVIDER,
+    }
+
+
+@router.get("/rankings/top-models")
+async def get_top_models(request: Request, user=Depends(get_verified_user)):
+    """
+    Get only the top model IDs for quick access.
+    Returns top 3 models each from OpenAI, Anthropic, Google/Gemini, and xAI/Grok.
+    """
+    result = await get_rankings(request, user)
+    return {"top_models": result.get("top_models", [])}
+
+
 @router.api_route("/{path:path}", methods=["POST"])
 async def proxy(path: str, request: Request, user=Depends(get_verified_user)):
     """
