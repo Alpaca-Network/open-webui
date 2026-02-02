@@ -565,7 +565,10 @@ async def activate_top_gatewayz_models(app: FastAPI):
     """
     try:
         if not app.state.config.GATEWAYZ_API_BASE_URLS:
-            log.info("No Gatewayz API URLs configured, skipping auto-activation")
+            log.info(
+                "No Gatewayz API URLs configured. "
+                "Set GATEWAYZ_API_BASE_URL to enable auto-activation of top models."
+            )
             return
 
         # Use the first configured URL and key
@@ -576,11 +579,24 @@ async def activate_top_gatewayz_models(app: FastAPI):
             else ""
         )
 
-        log.info("Fetching Gatewayz rankings to activate top models...")
+        if not api_key:
+            log.warning(
+                "No Gatewayz API key configured. "
+                "Set GATEWAYZ_API_KEY to enable auto-activation of top models. "
+                "You can configure this in the Admin settings or via environment variable."
+            )
+            # Continue anyway - the API might not require a key or it might be public
+            # The fetch will fail gracefully if authentication is required
+
+        log.info(f"Fetching Gatewayz rankings from {api_url}...")
         rankings = await fetch_rankings_from_gatewayz(api_url, api_key)
 
         if not rankings:
-            log.warning("No rankings data received from Gatewayz API")
+            log.warning(
+                "No rankings data received from Gatewayz API. "
+                "Top models will not be auto-activated. "
+                "You can manually configure models in the Admin settings."
+            )
             return
 
         # Extract top models by provider
@@ -589,21 +605,30 @@ async def activate_top_gatewayz_models(app: FastAPI):
         )
 
         if not top_models:
-            log.warning("No top models extracted from rankings")
+            log.warning(
+                "No top models found in rankings. "
+                "Model list will remain empty until configured in Admin settings."
+            )
             return
 
         log.info(f"Setting {len(top_models)} top models as active: {top_models}")
 
         # Update the GATEWAYZ_API_CONFIGS for the first URL to include these models
-        configs = app.state.config.GATEWAYZ_API_CONFIGS
-        if "0" not in configs:
-            configs["0"] = {}
+        # Create a new dict to ensure PersistentConfig setter is triggered
+        current_configs = dict(app.state.config.GATEWAYZ_API_CONFIGS)
 
-        configs["0"]["enable"] = True
-        configs["0"]["model_ids"] = top_models
+        # Update config for the first URL (index 0)
+        if "0" not in current_configs:
+            current_configs["0"] = {}
 
-        # Persist the configuration update
-        app.state.config.GATEWAYZ_API_CONFIGS = configs
+        current_configs["0"] = {
+            **current_configs.get("0", {}),
+            "enable": True,
+            "model_ids": top_models,
+        }
+
+        # Persist the configuration update by assigning new dict
+        app.state.config.GATEWAYZ_API_CONFIGS = current_configs
 
         log.info("Successfully activated top Gatewayz models")
 

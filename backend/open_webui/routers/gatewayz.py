@@ -400,13 +400,21 @@ TOP_MODELS_PER_PROVIDER = 3
 
 
 async def fetch_rankings_from_gatewayz(api_url: str, api_key: str) -> list:
-    """Fetch rankings from Gatewayz API"""
+    """
+    Fetch rankings from Gatewayz API.
+
+    Uses the /ranking/apps endpoint as documented at:
+    https://docs.gatewayz.ai/get-ranking-apps-22337458e0
+
+    This endpoint returns ranked models/apps from the Gatewayz platform.
+    """
     # Use the base URL to construct the rankings endpoint
     # Remove /v1 suffix if present to get base API URL
     base_url = api_url.rstrip("/")
     if base_url.endswith("/v1"):
         base_url = base_url[:-3]
 
+    # Endpoint verified from Gatewayz API documentation
     rankings_url = f"{base_url}/ranking/apps"
 
     timeout = aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST)
