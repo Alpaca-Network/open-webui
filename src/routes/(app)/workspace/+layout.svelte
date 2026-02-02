@@ -87,7 +87,7 @@
 								class="min-w-fit p-1.5 {$page.url.pathname.includes('/workspace/models')
 									? ''
 									: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition"
-								href="/workspace/models">{$i18n.t('Models')}</a
+								href="/workspace/models">{$i18n.t('Agents')}</a
 							>
 						{/if}
 
